@@ -1,0 +1,16 @@
+{
+  "name": "rent-ledger-backend",
+  "version": "1.0.0",
+  "description": "Rent Ledger Backend API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "migrate": "knex migrate:latest",
+    "seed": "knex seed:run"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "knex": "^3.1.0",
+    "pg": "^8.12.0"
+  }
+}
