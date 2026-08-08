@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: rent_ledger_db
+    environment:
+      POSTGRES_DB: rent_ledger
+      POSTGRES_USER: rent_user
+      POSTGRES_PASSWORD: rent_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rent_user -d rent_ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  gateway:
+    build: ./gateway
+    container_name: rent_ledger_gateway
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: rent_ledger_backend
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://rent_user:rent_pass@db:5432/rent_ledger
+      GATEWAY_URL: http://gateway:4000
+      GATEWAY_TIMEOUT_MS: 5000
+      PORT: 3000
+      NODE_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
