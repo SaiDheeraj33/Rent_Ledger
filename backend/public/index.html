@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rent Ledger — Property Dashboard</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 20px auto;
+      max-width: 1000px;
+      color: #333;
+      line-height: 1.5;
+    }
+    h1, h2, h3 { margin-bottom: 8px; }
+    .card {
+      border: 1px solid #ccc;
+      padding: 16px;
+      margin-bottom: 24px;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      background: #fff;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+    }
+    th { background: #f0f0f0; }
+    .badge-paid { color: #2e7d32; font-weight: bold; }
+    .badge-due { color: #c62828; font-weight: bold; }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    label {
+      display: inline-block;
+      width: 140px;
+      font-weight: bold;
+    }
+    input, select, button {
+      padding: 8px 12px;
+      font-size: 14px;
+    }
+    button {
+      cursor: pointer;
+      background: #0284c7;
+      color: white;
+      border: none;
+      border-radius: 4px;
+    }
+    button:disabled { background: #888; }
+    .alert {
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      border-radius: 4px;
+      display: none;
+    }
+    .alert-success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .statement-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 16px;
+    }
+    .text-right { text-align: right; }
+    .text-center { text-align: center; }
+  </style>
+</head>
+<body>
+
+  <h1>Property Rent Ledger</h1>
+  <p>Dashboard to track tenant balances, view historical statements, and record rent payments.</p>
+
+  <!-- Notification Banner -->
+  <div id="alertBanner" class="alert"></div>
+
+  <!-- 1. Record Payment Form -->
+  <div class="card">
+    <h2>Record a Payment</h2>
+    <form id="paymentForm">
+      <div class="form-group">
+        <label for="tenantSelect">Select Tenant:</label>
+        <select id="tenantSelect" required>
+          <option value="">-- Loading Tenants --</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="amountInput">Amount (₹):</label>
+        <input type="number" id="amountInput" min="1" step="0.01" placeholder="e.g. 25000" required>
+      </div>
+
+      <div class="form-group">
+        <label for="dateInput">Payment Date:</label>
+        <input type="date" id="dateInput" required>
+      </div>
+
+      <button type="submit" id="submitBtn">Submit Payment to Gateway</button>
+      <span id="loadingSpinner" style="display: none; margin-left: 10px;">Processing via Payment Gateway...</span>
+    </form>
+  </div>
+
+  <!-- 2. Tenants List Table -->
+  <div class="card">
+    <h2>Tenant Ledger Overview</h2>
+    <table id="tenantsTable">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Tenant Name</th>
+          <th>Unit</th>
+          <th>Monthly Rent</th>
+          <th>Maintenance</th>
+          <th>Total Billed</th>
+          <th>Total Paid</th>
+          <th>Current Owed</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="9" class="text-center">Loading tenant records...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 3. Statement Section -->
+  <div class="card" id="statementCard" style="display: none;">
+    <div class="statement-header">
+      <h2 id="statementTitle">Tenant Statement</h2>
+      <div>
+        <label for="asOfInput" style="width: auto;">As Of Date:</label>
+        <input type="date" id="asOfInput">
+        <button id="refreshStatementBtn" type="button">Filter</button>
+      </div>
+    </div>
+
+    <div id="statementMeta"></div>
+
+    <table id="statementTable">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th class="text-right">Amount (₹)</th>
+          <th class="text-right">Running Balance (₹)</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+    let currentSelectedTenantId = null;
+
+    // Set today's date default
+    const todayStr = new Date().toISOString().split('T')[0];
+    document.getElementById('dateInput').value = todayStr;
+    document.getElementById('asOfInput').value = todayStr;
+
+    // Fetch and render tenant list
+    async function loadTenants() {
+      try {
+        const res = await fetch('/tenants');
+        const tenants = await res.json();
+
+        // Populate dropdown
+        const select = document.getElementById('tenantSelect');
+        select.innerHTML = '<option value="">-- Choose Tenant --</option>';
+        tenants.forEach(t => {
+          select.innerHTML += `<option value="${t.id}">${t.name} (${t.unit}) — Monthly: ₹${t.monthly_total.toLocaleString()}</option>`;
+        });
+
+        // Populate table
+        const tbody = document.querySelector('#tenantsTable tbody');
+        tbody.innerHTML = '';
+        tenants.forEach(t => {
+          const balanceClass = t.current_balance <= 0 ? 'badge-paid' : 'badge-due';
+          const balanceText = t.current_balance <= 0 ? `₹${t.current_balance.toLocaleString()} (Paid)` : `₹${t.current_balance.toLocaleString()} Due`;
+
+          tbody.innerHTML += `
+            <tr>
+              <td>${t.id}</td>
+              <td><strong>${t.name}</strong></td>
+              <td>${t.unit}</td>
+              <td>₹${t.monthly_rent.toLocaleString()}</td>
+              <td>₹${t.monthly_maintenance.toLocaleString()}</td>
+              <td>₹${t.total_billed.toLocaleString()}</td>
+              <td>₹${t.total_paid.toLocaleString()}</td>
+              <td class="${balanceClass}">${balanceText}</td>
+              <td>
+                <button onclick="viewStatement(${t.id}, '${t.name}')">View Statement</button>
+              </td>
+            </tr>
+          `;
+        });
+      } catch (err) {
+        showAlert('Failed to load tenants list: ' + err.message, 'error');
+      }
+    }
+
+    // Submit payment form
+    document.getElementById('paymentForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const tenantId = document.getElementById('tenantSelect').value;
+      const amount = document.getElementById('amountInput').value;
+      const paymentDate = document.getElementById('dateInput').value;
+
+      if (!tenantId) {
+        showAlert('Please select a tenant.', 'error');
+        return;
+      }
+
+      const submitBtn = document.getElementById('submitBtn');
+      const spinner = document.getElementById('loadingSpinner');
+      submitBtn.disabled = true;
+      spinner.style.display = 'inline';
+      hideAlert();
+
+      try {
+        const idempotencyKey = `pay_${tenantId}_${amount}_${paymentDate}_${Date.now()}`;
+
+        const res = await fetch('/payments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenant_id: parseInt(tenantId),
+            amount: parseFloat(amount),
+            payment_date: paymentDate,
+            idempotency_key: idempotencyKey
+          })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+          showAlert(`✅ Payment Successful! Txn ID: ${data.payment.gateway_transaction_id}. Recorded in ledger.`, 'success');
+          document.getElementById('amountInput').value = '';
+          await loadTenants();
+          if (currentSelectedTenantId === parseInt(tenantId)) {
+            fetchStatement(currentSelectedTenantId);
+          }
+        } else {
+          showAlert(`❌ Gateway Error: ${data.error} (Status recorded as failed). You can retry.`, 'error');
+          await loadTenants();
+        }
+      } catch (err) {
+        showAlert(`⚠️ Network error: ${err.message}`, 'error');
+      } finally {
+        submitBtn.disabled = false;
+        spinner.style.display = 'none';
+      }
+    });
+
+    // View tenant statement
+    function viewStatement(id, name) {
+      currentSelectedTenantId = id;
+      document.getElementById('statementTitle').innerText = `Statement: ${name}`;
+      document.getElementById('statementCard').style.display = 'block';
+      fetchStatement(id);
+    }
+
+    document.getElementById('refreshStatementBtn').addEventListener('click', () => {
+      if (currentSelectedTenantId) {
+        fetchStatement(currentSelectedTenantId);
+      }
+    });
+
+    async function fetchStatement(id) {
+      const asOf = document.getElementById('asOfInput').value;
+      try {
+        const res = await fetch(`/tenants/${id}/statement?asOf=${asOf}`);
+        const data = await res.json();
+
+        document.getElementById('statementMeta').innerHTML = `
+          <p><strong>Tenant:</strong> ${data.tenant.name} (${data.tenant.unit}) | 
+          <strong>Statement As Of:</strong> ${data.asOf} | 
+          <strong>Closing Balance as of ${data.asOf}:</strong> ₹${data.balance.toLocaleString()}</p>
+        `;
+
+        const tbody = document.querySelector('#statementTable tbody');
+        tbody.innerHTML = '';
+
+        if (data.entries.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-center">No ledger entries found as of this date.</td></tr>';
+          return;
+        }
+
+        data.entries.forEach(entry => {
+          const typeBadge = entry.entry_type === 'bill' ? `[BILL: ${entry.bill_type}]` : '[PAYMENT]';
+          const amtStyle = entry.amount > 0 ? 'color: #c62828;' : 'color: #2e7d32;';
+          const formattedAmt = entry.amount > 0 ? `+₹${entry.amount.toLocaleString()}` : `-₹${Math.abs(entry.amount).toLocaleString()}`;
+
+          tbody.innerHTML += `
+            <tr>
+              <td>${entry.date}</td>
+              <td>${typeBadge}</td>
+              <td>${entry.description}</td>
+              <td class="text-right" style="${amtStyle}">${formattedAmt}</td>
+              <td class="text-right"><strong>₹${entry.running_balance.toLocaleString()}</strong></td>
+            </tr>
+          `;
+        });
+      } catch (err) {
+        showAlert('Failed to load statement: ' + err.message, 'error');
+      }
+    }
+
+    function showAlert(msg, type) {
+      const alert = document.getElementById('alertBanner');
+      alert.innerText = msg;
+      alert.className = `alert alert-${type}`;
+      alert.style.display = 'block';
+    }
+
+    function hideAlert() {
+      document.getElementById('alertBanner').style.display = 'none';
+    }
+
+    // Initial load
+    loadTenants();
+  </script>
+</body>
+</html>
