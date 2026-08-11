@@ -174,11 +174,11 @@ async function getTenantStatement(tenantId, asOfDate) {
 async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
   const queryExecutor = trx || db;
 
-  // Get total successful payments made BEFORE this payment date (not including current)
+  // Get total successful payments made on or before this payment date (including current payment)
   const paidResult = await queryExecutor('payments')
     .where('tenant_id', tenantId)
     .where('gateway_status', 'success')
-    .where('payment_date', '<', paymentDate)
+    .where('payment_date', '<=', paymentDate)
     .sum('amount as total');
 
   let remainingPaid = parseFloat(paidResult[0]?.total || 0);
