@@ -10,7 +10,7 @@ Assume a machine with **Docker** and **Docker Compose** installed.
 
 ```bash
 # 1. Clone the repository and navigate into the directory
-git clone <repo-url>
+git clone https://github.com/SaiDheeraj33/Rent_Ledger.git
 cd Rent_Ledger
 
 # 2. Start all services (Database, Gateway, Backend API & Frontend)
@@ -34,9 +34,10 @@ docker compose down -v && docker compose up --build
 
 Because Section 3 of the brief was intentionally open-ended, I have defined the following rules and implemented them.
 
-1. **Late Fee Rule (5% Flat Penalty)**:
-   - **Decision**: When a payment is recorded after a bill's `due_date`, a 5% late fee is assessed on the overdue bill's amount.
-   - **Why**: Simple, transparent, and industry-standard in residential property management. Flat percentages avoid predatory compounding daily interest calculations while penalizing late payments.
+1. **Late Fee Rule (5% on Overdue Portion Settled)**:
+   - **Decision**: When a payment settles overdue bills, a 5% late fee is assessed only on the overdue portion that the current payment covers — not on the full bill amount. Prior on-time payments are FIFO-consumed first and do not trigger late fees. One late fee is assessed per billing period (never re-assessed on subsequent payments to the same period).
+   - **Example**: Tenant owes ₹20,000 for June (overdue). Prior payments already covered March–May on time. A new ₹300 payment goes toward June's remaining ₹8,000 unpaid balance → late fee = 5% × ₹300 = ₹15. Balance decreases by ₹285.
+   - **Why**: This ensures any payment always reduces the tenant's balance (late fee ≤ 5% of payment), preventing the counterintuitive scenario where a small payment increases the total owed. Simple flat percentage avoids predatory compounding. Trade-off acknowledged: a tenant making many small payments pays less total late fees than one making a single large payment — but this encourages partial payment over non-payment, which is the better outcome for a landlord.
 
 2. **No Late Fees on Late Fees**:
    - **Decision**: Late fee bills do not accumulate further late fees if unpaid.
