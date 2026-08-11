@@ -167,21 +167,35 @@ async function getTenantStatement(tenantId, asOfDate) {
 }
 
 /**
- * Assesses late fees (5% of unpaid bill amount) when a payment is made late.
- * Uses FIFO — walks bills oldest-first, subtracts prior successful payments,
- * and only generates a late fee for bills not already covered by prior payments.
+ * Assesses late fees (5% of overdue amount) when a payment settles overdue bills.
+ *
+ * Key insight: prior payments that already settled earlier bills on time must NOT
+ * trigger late fees. Only the CURRENT payment touching still-unpaid overdue bills
+ * should generate late fees — and only on the portion it covers.
+ *
+ * Algorithm:
+ *  1. Calculate prior successful payments (everything except the current payment).
+ *  2. FIFO-allocate prior payments to overdue bills — these were on-time, no late fees.
+ *  3. FIFO-allocate the current payment to remaining unpaid overdue bills.
+ *  4. For each overdue period the current payment touches, assess a 5% late fee
+ *     on the amount being settled (if no late fee already exists for that period).
+ *
+ * This guarantees: late_fees_created <= 5% × currentPaymentAmount,
+ * so the tenant's balance always decreases with any payment.
  */
-async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
+async function assessLateFeesIfOverdue(tenantId, paymentDate, currentPaymentAmount, trx) {
   const queryExecutor = trx || db;
 
-  // Get total successful payments made on or before this payment date (including current payment)
-  const paidResult = await queryExecutor('payments')
+  // Sum ALL successful payments up to paymentDate (includes the current one just marked success)
+  const allPaidResult = await queryExecutor('payments')
     .where('tenant_id', tenantId)
     .where('gateway_status', 'success')
     .where('payment_date', '<=', paymentDate)
     .sum('amount as total');
 
-  let remainingCredit = parseFloat(paidResult[0]?.total || 0);
+  const totalPaid = parseFloat(allPaidResult[0]?.total || 0);
+  // Prior payments = everything except the current payment
+  const priorPaid = totalPaid - currentPaymentAmount;
 
   // Get all rent/maintenance bills due before paymentDate, oldest first (FIFO)
   const overdueBills = await queryExecutor('bills')
@@ -190,50 +204,69 @@ async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
     .where('due_date', '<', paymentDate)
     .orderBy('due_date', 'asc');
 
-  const lateFeesCreated = [];
-
-  // Group overdue bills by period_start to respect table constraint: unique(['tenant_id', 'bill_type', 'period_start'])
+  // Group overdue bills by period_start (respects unique constraint on bills table)
+  const periods = [];
   const periodMap = new Map();
   for (const bill of overdueBills) {
-    if (!periodMap.has(bill.period_start)) {
-      periodMap.set(bill.period_start, {
+    const key = formatDateString(bill.period_start);
+    if (!periodMap.has(key)) {
+      const p = {
         period_start: bill.period_start,
         period_end: bill.period_end,
         due_date: bill.due_date,
         descriptions: [],
         totalAmount: 0
-      });
+      };
+      periodMap.set(key, p);
+      periods.push(p);
     }
-    const period = periodMap.get(bill.period_start);
+    const period = periodMap.get(key);
     period.descriptions.push(bill.description);
     period.totalAmount += parseFloat(bill.amount);
   }
 
-  for (const [periodStart, period] of periodMap.entries()) {
-    if (remainingCredit <= 0) break;
+  // --- FIFO two-pass allocation ---
+  let remainingPriorCredit = priorPaid;
+  let remainingCurrentCredit = currentPaymentAmount;
+  const lateFeesCreated = [];
 
+  for (const period of periods) {
     const periodAmount = period.totalAmount;
-    const amountPaidForPeriod = Math.min(remainingCredit, periodAmount);
-    remainingCredit -= amountPaidForPeriod;
 
-    // Only assess a late fee if payment allocation reached this overdue period (amountPaidForPeriod > 0)
-    if (amountPaidForPeriod > 0) {
+    // Pass 1: Consume prior payments first (these settled bills on time — no late fee)
+    if (remainingPriorCredit >= periodAmount) {
+      remainingPriorCredit -= periodAmount;
+      continue; // Fully covered by earlier payments
+    }
+
+    // Prior payments partially cover (or don't cover) this period
+    const uncoveredByPrior = periodAmount - remainingPriorCredit;
+    remainingPriorCredit = 0;
+
+    // Pass 2: Apply current payment to the uncovered overdue portion
+    if (remainingCurrentCredit <= 0) break; // Current payment fully consumed
+
+    const paidByCurrentPayment = Math.min(remainingCurrentCredit, uncoveredByPrior);
+    remainingCurrentCredit -= paidByCurrentPayment;
+
+    // Only assess late fee if the current payment is actually settling overdue bills
+    if (paidByCurrentPayment > 0) {
       const existingLateFee = await queryExecutor('bills')
         .where('tenant_id', tenantId)
         .where('bill_type', 'late_fee')
-        .where('period_start', periodStart)
+        .where('period_start', period.period_start)
         .first();
 
       if (!existingLateFee) {
-        // Late fee is 5% of the overdue bill amount being settled late by payments
-        const feeAmount = Math.round((amountPaidForPeriod * 0.05) * 100) / 100;
+        // Late fee = 5% of the overdue amount being settled by this payment
+        const feeAmount = Math.round((paidByCurrentPayment * 0.05) * 100) / 100;
 
         if (feeAmount > 0) {
           const [newFee] = await queryExecutor('bills').insert({
             tenant_id: tenantId,
             bill_type: 'late_fee',
             amount: feeAmount,
-            due_date: paymentDate, // Late fee is due on the date payment was finally made
+            due_date: paymentDate,
             period_start: period.period_start,
             period_end: period.period_end,
             description: `Late Fee: Overdue ${period.descriptions.join(' & ')} (5%)`

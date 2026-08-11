@@ -82,6 +82,7 @@ router.post('/', async (req, res, next) => {
         lateFeesGenerated = await billingService.assessLateFeesIfOverdue(
           parsedTenantId,
           validPaymentDate,
+          parsedAmount,
           trx
         );
       });
