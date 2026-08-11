@@ -73,8 +73,8 @@ async function getTenantStatement(tenantId, asOfDate) {
   }
 
   // Target asOf date string (default to today if missing or invalid)
-  const targetDate = (asOfDate && !isNaN(Date.parse(asOfDate))) 
-    ? asOfDate 
+  const targetDate = (asOfDate && !isNaN(Date.parse(asOfDate)))
+    ? asOfDate
     : new Date().toISOString().split('T')[0];
 
   // Fetch bills due on or before targetDate
@@ -167,38 +167,79 @@ async function getTenantStatement(tenantId, asOfDate) {
 }
 
 /**
- * Assesses late fees (5% of overdue bill amount) when a payment is made late.
+ * Assesses late fees (5% of unpaid bill amount) when a payment is made late.
+ * Uses FIFO — walks bills oldest-first, subtracts prior successful payments,
+ * and only generates a late fee for bills not already covered by prior payments.
  */
 async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
   const queryExecutor = trx || db;
 
-  // Find all rent/maintenance bills where due_date < paymentDate
+  // Get total successful payments made BEFORE this payment date (not including current)
+  const paidResult = await queryExecutor('payments')
+    .where('tenant_id', tenantId)
+    .where('gateway_status', 'success')
+    .where('payment_date', '<', paymentDate)
+    .sum('amount as total');
+
+  let remainingPaid = parseFloat(paidResult[0]?.total || 0);
+
+  // Get all rent/maintenance bills due before paymentDate, oldest first (FIFO)
   const overdueBills = await queryExecutor('bills')
     .where('tenant_id', tenantId)
     .whereIn('bill_type', ['rent', 'maintenance'])
-    .where('due_date', '<', paymentDate);
+    .where('due_date', '<', paymentDate)
+    .orderBy('due_date', 'asc');
 
   const lateFeesCreated = [];
 
+  // Group overdue bills by period_start to respect table constraint: unique(['tenant_id', 'bill_type', 'period_start'])
+  const periodMap = new Map();
   for (const bill of overdueBills) {
-    // Check if late fee already generated for this bill
+    if (!periodMap.has(bill.period_start)) {
+      periodMap.set(bill.period_start, {
+        period_start: bill.period_start,
+        period_end: bill.period_end,
+        due_date: bill.due_date,
+        descriptions: [],
+        totalAmount: 0
+      });
+    }
+    const period = periodMap.get(bill.period_start);
+    period.descriptions.push(bill.description);
+    period.totalAmount += parseFloat(bill.amount);
+  }
+
+  for (const [periodStart, period] of periodMap.entries()) {
+    const periodAmount = period.totalAmount;
+
+    if (remainingPaid >= periodAmount) {
+      // This period's bills were fully covered by prior payments — no late fee
+      remainingPaid -= periodAmount;
+      continue;
+    }
+
+    const unpaidAmount = Math.max(periodAmount - remainingPaid, 0);
+    remainingPaid = 0; // consumed all prior payment credit
+
+    // Check if a late_fee bill already exists for this tenant & period_start
     const existingLateFee = await queryExecutor('bills')
       .where('tenant_id', tenantId)
       .where('bill_type', 'late_fee')
-      .where('period_start', bill.period_start)
+      .where('period_start', periodStart)
       .first();
 
-    if (!existingLateFee) {
-      const feeAmount = Math.round((parseFloat(bill.amount) * 0.05) * 100) / 100;
+    if (!existingLateFee && unpaidAmount > 0) {
+      const feeAmount = Math.round((unpaidAmount * 0.05) * 100) / 100;
+
       if (feeAmount > 0) {
         const [newFee] = await queryExecutor('bills').insert({
           tenant_id: tenantId,
           bill_type: 'late_fee',
           amount: feeAmount,
-          due_date: paymentDate, // Late fee is due on payment date
-          period_start: bill.period_start,
-          period_end: bill.period_end,
-          description: `Late Fee: Overdue ${bill.description} (5%)`
+          due_date: paymentDate, // Late fee is due on the date payment was finally made
+          period_start: period.period_start,
+          period_end: period.period_end,
+          description: `Late Fee: Overdue ${period.descriptions.join(' & ')} (5%)`
         }).returning('*');
 
         lateFeesCreated.push(newFee);
