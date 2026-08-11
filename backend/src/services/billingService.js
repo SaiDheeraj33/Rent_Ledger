@@ -181,7 +181,7 @@ async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
     .where('payment_date', '<=', paymentDate)
     .sum('amount as total');
 
-  let remainingPaid = parseFloat(paidResult[0]?.total || 0);
+  let remainingCredit = parseFloat(paidResult[0]?.total || 0);
 
   // Get all rent/maintenance bills due before paymentDate, oldest first (FIFO)
   const overdueBills = await queryExecutor('bills')
@@ -210,39 +210,37 @@ async function assessLateFeesIfOverdue(tenantId, paymentDate, trx) {
   }
 
   for (const [periodStart, period] of periodMap.entries()) {
+    if (remainingCredit <= 0) break;
+
     const periodAmount = period.totalAmount;
+    const amountPaidForPeriod = Math.min(remainingCredit, periodAmount);
+    remainingCredit -= amountPaidForPeriod;
 
-    if (remainingPaid >= periodAmount) {
-      // This period's bills were fully covered by prior payments — no late fee
-      remainingPaid -= periodAmount;
-      continue;
-    }
+    // Only assess a late fee if payment allocation reached this overdue period (amountPaidForPeriod > 0)
+    if (amountPaidForPeriod > 0) {
+      const existingLateFee = await queryExecutor('bills')
+        .where('tenant_id', tenantId)
+        .where('bill_type', 'late_fee')
+        .where('period_start', periodStart)
+        .first();
 
-    const unpaidAmount = Math.max(periodAmount - remainingPaid, 0);
-    remainingPaid = 0; // consumed all prior payment credit
+      if (!existingLateFee) {
+        // Late fee is 5% of the overdue bill amount being settled late by payments
+        const feeAmount = Math.round((amountPaidForPeriod * 0.05) * 100) / 100;
 
-    // Check if a late_fee bill already exists for this tenant & period_start
-    const existingLateFee = await queryExecutor('bills')
-      .where('tenant_id', tenantId)
-      .where('bill_type', 'late_fee')
-      .where('period_start', periodStart)
-      .first();
+        if (feeAmount > 0) {
+          const [newFee] = await queryExecutor('bills').insert({
+            tenant_id: tenantId,
+            bill_type: 'late_fee',
+            amount: feeAmount,
+            due_date: paymentDate, // Late fee is due on the date payment was finally made
+            period_start: period.period_start,
+            period_end: period.period_end,
+            description: `Late Fee: Overdue ${period.descriptions.join(' & ')} (5%)`
+          }).returning('*');
 
-    if (!existingLateFee && unpaidAmount > 0) {
-      const feeAmount = Math.round((unpaidAmount * 0.05) * 100) / 100;
-
-      if (feeAmount > 0) {
-        const [newFee] = await queryExecutor('bills').insert({
-          tenant_id: tenantId,
-          bill_type: 'late_fee',
-          amount: feeAmount,
-          due_date: paymentDate, // Late fee is due on the date payment was finally made
-          period_start: period.period_start,
-          period_end: period.period_end,
-          description: `Late Fee: Overdue ${period.descriptions.join(' & ')} (5%)`
-        }).returning('*');
-
-        lateFeesCreated.push(newFee);
+          lateFeesCreated.push(newFee);
+        }
       }
     }
   }
